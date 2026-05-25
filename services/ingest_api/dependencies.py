@@ -7,6 +7,7 @@ from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from services.ingest_api.config import Settings
+from services.ingest_api.queue import ArqEnqueuer, JobEnqueuer
 from services.ingest_api.storage import S3Config, S3Storage
 
 
@@ -36,6 +37,16 @@ def get_storage(request: Request) -> S3Storage:
     if storage is None:
         raise RuntimeError("storage not initialized on app state")
     return storage
+
+
+def get_enqueuer(request: Request) -> JobEnqueuer:
+    enqueuer: JobEnqueuer | None = getattr(request.app.state, "enqueuer", None)
+    if enqueuer is None:
+        raise RuntimeError("enqueuer not initialized on app state")
+    return enqueuer
+
+
+__all__ = ["ArqEnqueuer", "JobEnqueuer", "get_enqueuer"]
 
 
 def build_storage(settings: Settings) -> S3Storage:

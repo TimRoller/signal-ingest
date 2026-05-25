@@ -57,6 +57,18 @@ class FilesRepository:
     async def get(self, file_id: UUID) -> FileORM | None:
         return await self._session.get(FileORM, file_id)
 
+    async def set_status(
+        self, file_id: UUID, status: FileStatus, *, error_message: str | None = None
+    ) -> FileORM:
+        row = await self._session.get(FileORM, file_id)
+        if row is None:
+            raise RuntimeError(f"file {file_id} not found")
+        row.status = status
+        row.error_message = error_message
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
     async def list(
         self,
         *,

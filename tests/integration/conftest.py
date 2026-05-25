@@ -13,6 +13,7 @@ from asgi_lifespan import LifespanManager
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.waiting_utils import wait_for_logs
 from testcontainers.postgres import PostgresContainer
+from testcontainers.redis import RedisContainer
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -25,6 +26,23 @@ def postgres_container() -> Iterator[PostgresContainer]:
         yield container
     finally:
         container.stop()
+
+
+@pytest.fixture(scope="session")
+def redis_container() -> Iterator[RedisContainer]:
+    container = RedisContainer(image="redis:7-alpine")
+    container.start()
+    try:
+        yield container
+    finally:
+        container.stop()
+
+
+@pytest.fixture(scope="session")
+def redis_url(redis_container: RedisContainer) -> str:
+    host = redis_container.get_container_host_ip()
+    port = redis_container.get_exposed_port(6379)
+    return f"redis://{host}:{port}"
 
 
 @pytest.fixture(scope="session")
@@ -80,13 +98,16 @@ async def client(
     monkeypatch: pytest.MonkeyPatch,
     database_url: str,
     s3_endpoint_url: str,
+    redis_url: str,
 ) -> AsyncIterator[httpx.AsyncClient]:
     monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.setenv("REDIS_URL", redis_url)
     monkeypatch.setenv("S3_ENDPOINT_URL", s3_endpoint_url)
     monkeypatch.setenv("S3_ACCESS_KEY", "minio")
     monkeypatch.setenv("S3_SECRET_KEY", "minio12345")
     monkeypatch.setenv("S3_REGION", "us-east-1")
     monkeypatch.setenv("BRONZE_BUCKET", "bronze")
+    monkeypatch.setenv("SILVER_BUCKET", "silver")
 
     from services.ingest_api.dependencies import get_settings
     from services.ingest_api.main import app
@@ -106,7 +127,7 @@ async def client(
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def truncate_files_between_tests(database_url: str) -> AsyncIterator[None]:
+async def truncate_db_between_tests(database_url: str) -> AsyncIterator[None]:
     yield
     from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -114,5 +135,45 @@ async def truncate_files_between_tests(database_url: str) -> AsyncIterator[None]
     async with engine.begin() as conn:
         from sqlalchemy import text
 
-        await conn.execute(text("TRUNCATE TABLE files"))
+        await conn.execute(text("TRUNCATE TABLE processing_jobs, files RESTART IDENTITY CASCADE"))
     await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def run_worker_burst(
+    monkeypatch: pytest.MonkeyPatch,
+    database_url: str,
+    s3_endpoint_url: str,
+    redis_url: str,
+):
+    """Returns a callable that drains all queued Arq jobs once."""
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.setenv("REDIS_URL", redis_url)
+    monkeypatch.setenv("S3_ENDPOINT_URL", s3_endpoint_url)
+    monkeypatch.setenv("S3_ACCESS_KEY", "minio")
+    monkeypatch.setenv("S3_SECRET_KEY", "minio12345")
+    monkeypatch.setenv("S3_REGION", "us-east-1")
+    monkeypatch.setenv("BRONZE_BUCKET", "bronze")
+    monkeypatch.setenv("SILVER_BUCKET", "silver")
+
+    from arq import Worker
+    from arq.connections import RedisSettings
+
+    from services.worker.main import shutdown, startup
+    from services.worker.tasks import clean_file
+
+    async def _run() -> None:
+        worker = Worker(
+            functions=[clean_file],
+            redis_settings=RedisSettings.from_dsn(redis_url),
+            burst=True,
+            on_startup=startup,
+            on_shutdown=shutdown,
+            max_tries=3,
+            handle_signals=False,
+            poll_delay=0.1,
+        )
+        await worker.async_run()
+        await worker.close()
+
+    return _run

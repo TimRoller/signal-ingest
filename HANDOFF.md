@@ -1,10 +1,20 @@
 # Handoff
 
 ## State (2026-05-24)
-**Phase 1 — shipped.** Repo public, CI green, `POST /upload` end-to-end verified. Ready to start Phase 2.
+**Phase 2 — shipped.** Worker pipeline live: upload → enqueue → polars cleaning → Parquet in silver → status flips to `cleaned`. Hand-coded plans for `demo` and `vendor_a`. Phase 3 swaps in LLM plan generation on the same boundary.
 
 - Repo: https://github.com/TimRoller/signal-ingest
-- Latest release: [v0.2.0](https://github.com/TimRoller/signal-ingest/releases/tag/v0.2.0)
+- Latest release: [v0.3.0](https://github.com/TimRoller/signal-ingest/releases/tag/v0.3.0)
+
+## DoD for Phase 2 — verified
+- [x] Upload demo CSV → within ~1s, status flips to `cleaned`
+- [x] Parquet at `silver/{source}/{yyyy}/{mm}/{dd}/{file_id}.parquet`, readable by DuckDB
+- [x] `processing_jobs` row tracks the run (queued → running → cleaned/failed) with attempts + timing
+- [x] Re-running is idempotent (silver overwritten, no orphan rows)
+- [x] Invalid CSV → status `failed` with `error_message`
+- [x] `POST /reprocess/{file_id}` re-enqueues a previously processed file
+- [x] `signal_cleaned_total{source,result}`, `signal_cleaning_duration_seconds{source}`, `signal_rows_processed{source}` on worker `/metrics` port 9100
+- [x] All 31 tests green (2 smoke + 11 unit + 18 integration); testcontainers spin up PG + Redis + MinIO
 
 ## DoD for Phase 1 — verified
 - [x] `POST /upload` accepts CSV, writes to MinIO bronze + row to Postgres, returns 201 with `FileRecord`
@@ -16,24 +26,23 @@
 - [x] Integration tests run against real Postgres + real MinIO via testcontainers — 13 tests, all green
 - [x] `docker compose up -d --build` boots full stack; ingest_api runs migrations before serving
 
-## Next — Phase 2 (Weeks 3–4)
-Goal: deterministic cleaning end-to-end. Upload → Redis enqueue → Arq worker pops job → reads bronze CSV → applies a *hard-coded* per-source cleaning plan (no LLM yet) → writes Parquet to silver → updates `files.status = 'cleaned'`.
+## Next — Phase 3 (Week 5)
+Goal: replace hand-coded cleaning plans with **LLM-generated** plans, keyed and cached by schema fingerprint. The `CleaningPlan` Pydantic model from Phase 2 is the LLM's exact output contract — already validated, already applied by deterministic code (ADR 0003).
 
-Build order to design (in a `docs/phases/phase-2.md` doc, mirroring the Phase 1 doc):
+Sketch of what Phase 3 introduces:
 
-1. **`processing_jobs` table** — references `files.id`; status enum (`queued` / `running` / `cleaned` / `failed`); retry count; `last_error`.
-2. **Job enqueue from ingest_api** — on successful upload (or via a separate POST /reprocess), push an Arq job with `file_id` as payload.
-3. **Worker bootstrap (Arq)** — connect to Redis, register `clean_file` task; lifespan-style init for shared DB session and S3 client.
-4. **Deterministic cleaning plan** — hard-coded `CleaningPlan` Pydantic models per source (e.g., `demo`, `vendor_a`). No LLM. This is the deterministic skeleton; Phase 3 will add LLM plan generation on top.
-5. **polars pipeline** — read bronze CSV, apply plan (rename, coerce, drop nulls, etc.), validate against a canonical Pydantic schema, write Parquet to `silver/{source}/{yyyy}/{mm}/{dd}/{file_id}.parquet`.
-6. **Status updates** — worker writes `running` on pickup, `cleaned` on success, `failed` + `error_message` on exception.
-7. **Observability** — span around clean_file, per-source success/failure counters, rows-processed histogram.
-8. **Integration test** — testcontainers spins up PG + Redis + MinIO; upload → wait for worker → assert silver Parquet exists + `files.status='cleaned'`.
+1. **`cleaning_plans` table** — stores plans keyed by `(source, fingerprint)`. Fingerprint = `hash(source, sorted column names, sample column types)`.
+2. **Plan generator** — Anthropic SDK client; prompts the LLM to emit a `CleaningPlan` JSON object given (file head, column names). Output validated against the Pydantic discriminated union.
+3. **Registry rewires to cache** — `get_plan(source, fingerprint)` now hits the PG cache first; on miss, calls the LLM, validates, persists, returns. The applier doesn't change.
+4. **Eval suite** — golden CSVs + expected canonical outputs in `evals/datasets/`; a CI-gated suite that grades LLM-generated plans against expected behavior. Use the `evals-guide.html` patterns.
+5. **Model routing** — Sonnet for novel/complex schemas, Haiku for retries on simpler shapes.
+6. **Cost discipline** — `signal_llm_cost_usd{model, source}` counter; plan reuse metrics.
 
 Acceptance:
-- Upload demo CSV → within ~2s, `GET /status/{file_id}` shows `status: "cleaned"`
-- Object exists at `silver/demo/.../{file_id}.parquet`, readable by DuckDB
-- `signal_cleaned_total{source="demo"} 1.0` on `/metrics`
+- Upload a CSV from a *new* source (no hand-coded plan) → LLM generates plan → file cleans successfully.
+- Re-upload the same shape → cache hit, no LLM call (verified via metric).
+- Eval suite has ≥10 golden datasets + ≥3 failure-mode datasets, CI-gated.
+- LLM cost per file is bounded and visible in `/metrics`.
 
 ## Operational Notes
 - **Docker runtime is OrbStack** (`brew install --cask orbstack`). docker CLI at `~/.orbstack/bin/docker` — interactive shell finds it via OrbStack's shell init, but the Claude Bash tool may not; prepend `export PATH="$HOME/.orbstack/bin:$PATH"` in commands if `docker` is "not found".

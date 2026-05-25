@@ -53,9 +53,29 @@ class S3Storage:
                 Metadata=metadata,
             )
 
+    async def get_object(self, key: str) -> bytes:
+        async with self._client() as client:
+            response = await client.get_object(Bucket=self._config.bucket, Key=key)  # type: ignore[attr-defined]
+            async with response["Body"] as stream:
+                data: bytes = await stream.read()
+                return data
+
     async def delete_object(self, key: str) -> None:
         async with self._client() as client:
             await client.delete_object(Bucket=self._config.bucket, Key=key)  # type: ignore[attr-defined]
 
     def uri_for(self, key: str) -> str:
         return f"s3://{self._config.bucket}/{key}"
+
+    @property
+    def bucket(self) -> str:
+        return self._config.bucket
+
+    @staticmethod
+    def parse_uri(uri: str) -> tuple[str, str]:
+        if not uri.startswith("s3://"):
+            raise ValueError(f"not an s3 uri: {uri}")
+        bucket, _, key = uri[len("s3://") :].partition("/")
+        if not bucket or not key:
+            raise ValueError(f"malformed s3 uri: {uri}")
+        return bucket, key

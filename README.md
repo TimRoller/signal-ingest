@@ -6,7 +6,7 @@
 
 > A production-shaped data ingestion + serving platform: messy CSVs in, deterministic LLM-driven cleaning, exposed via an MCP server, queryable from a Slackbot or web UI.
 
-**Status:** Phase 1 — ingest shipped · [v0.2.0](https://github.com/TimRoller/signal-ingest/releases) · CI green
+**Status:** Phase 2 — worker + cleaning shipped · [v0.3.0](https://github.com/TimRoller/signal-ingest/releases) · CI green
 
 ---
 
@@ -70,19 +70,22 @@ Short, durable decision records — what was chosen and what we accept by choosi
 ```bash
 docker compose up -d --build
 
-# upload a CSV
+# upload a CSV — worker picks it up and cleans it within ~1s
 echo "id,name,value" > sample.csv
-echo "1,alpha,10"    >> sample.csv
+echo "1,  alpha  ,10"    >> sample.csv
 curl -F 'file=@sample.csv;type=text/csv' -F 'source=demo' http://localhost:8000/upload
+# → {"file": {"id": "...", "status": "received", ...}, "duplicate": false}
 
-# upload again — same (source, sha256) → idempotent, returns same file_id with duplicate: true
-curl -F 'file=@sample.csv;type=text/csv' -F 'source=demo' http://localhost:8000/upload
+# poll status — flips to "cleaned" once the worker finishes
+curl http://localhost:8000/status/{file_id}
+# → {"id": "...", "status": "cleaned", ...}
 
-# list uploaded files
-curl http://localhost:8000/files
+# reprocess (idempotent — silver Parquet overwritten)
+curl -X POST http://localhost:8000/reprocess/{file_id}
 
-# Prometheus metrics
-curl http://localhost:8000/metrics | grep signal_uploads_total
+# metrics
+curl http://localhost:8000/metrics | grep signal_uploads_total      # ingest API
+curl http://localhost:9100/metrics | grep signal_cleaned_total      # worker
 
 docker compose down
 ```
@@ -93,7 +96,8 @@ Six services boot: `postgres` (with pgvector), `redis`, `minio`, `ingest_api`, `
 
 - [x] **Phase 0** — Repo scaffolded, docker-compose verified, CI green
 - [x] **Phase 1** — `POST /upload` → file in MinIO + row in Postgres
-- [ ] **Phase 2** — Queue + worker + deterministic cleaning end-to-end (next)
+- [x] **Phase 2** — Queue + worker + deterministic cleaning end-to-end
+- [ ] **Phase 3** — LLM plan generation + caching + evals (next)
 - [ ] **Phase 3** — LLM plan generation + caching + evals
 - [ ] **Phase 4** — MCP server with 4 tools
 - [ ] **Phase 5** — Slackbot / web UI consumer

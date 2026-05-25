@@ -12,11 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from services.ingest_api.config import Settings
 from services.ingest_api.dependencies import (
     build_storage,
+    get_enqueuer,
     get_session,
     get_settings,
     get_storage,
 )
 from services.ingest_api.metrics import UPLOAD_BYTES, UPLOADS_TOTAL
+from services.ingest_api.queue import ArqEnqueuer, JobEnqueuer, make_pool
 from services.ingest_api.storage import S3Storage
 from services.ingest_api.uploads import (
     buffer_and_hash,
@@ -26,8 +28,9 @@ from services.ingest_api.uploads import (
     validate_source,
 )
 from shared.db.repositories.files import FilesRepository
+from shared.db.repositories.processing_jobs import ProcessingJobsRepository
 from shared.db.session import make_engine, make_session_factory
-from shared.models.file import FileListResponse, FileRecord, UploadResponse
+from shared.models.file import FileListResponse, FileRecord, FileStatus, UploadResponse
 from shared.observability.init import init_tracing, instrument_fastapi
 
 _logger = logging.getLogger(__name__)
@@ -45,13 +48,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await storage.ensure_bucket()
     app.state.storage = storage
 
+    pool = await make_pool(settings.redis_url)
+    app.state.arq_pool = pool
+    app.state.enqueuer = ArqEnqueuer(pool)
+
     try:
         yield
     finally:
+        await pool.aclose()
         await engine.dispose()
 
 
-app = FastAPI(title="signal-ingest / ingest_api", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="signal-ingest / ingest_api", version="0.3.0", lifespan=lifespan)
 instrument_fastapi(app)
 
 
@@ -71,6 +79,7 @@ async def upload_csv(
     settings: Annotated[Settings, Depends(get_settings)],
     session: Annotated[AsyncSession, Depends(get_session)],
     storage: Annotated[S3Storage, Depends(get_storage)],
+    enqueuer: Annotated[JobEnqueuer, Depends(get_enqueuer)],
 ) -> UploadResponse:
     validated_source = validate_source(source)
     validate_content_type(file.content_type, settings.allowed_content_types)
@@ -107,15 +116,43 @@ async def upload_csv(
             raise HTTPException(status_code=500, detail="storage write failed") from exc
 
     buffered.spooled.close()
+
+    if created:
+        jobs = ProcessingJobsRepository(session)
+        await jobs.upsert_queued(row.id)
+
     await session.commit()
 
     if created:
+        await enqueuer.enqueue_clean(row.id)
         UPLOADS_TOTAL.labels(source=validated_source, result="created").inc()
         UPLOAD_BYTES.labels(source=validated_source).observe(buffered.byte_size)
         return UploadResponse(file=FileRecord.model_validate(row), duplicate=False)
 
     UPLOADS_TOTAL.labels(source=validated_source, result="duplicate").inc()
     response = UploadResponse(file=FileRecord.model_validate(row), duplicate=True)
+    return response
+
+
+@app.post("/reprocess/{file_id}", response_model=FileRecord)
+async def reprocess_file(
+    file_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    enqueuer: Annotated[JobEnqueuer, Depends(get_enqueuer)],
+) -> FileRecord:
+    files = FilesRepository(session)
+    jobs = ProcessingJobsRepository(session)
+
+    row = await files.get(file_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="file not found")
+
+    await jobs.upsert_queued(file_id)
+    updated = await files.set_status(file_id, FileStatus.received)
+    response = FileRecord.model_validate(updated)
+    await session.commit()
+
+    await enqueuer.enqueue_clean(file_id)
     return response
 
 

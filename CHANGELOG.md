@@ -7,7 +7,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This pr
 ## [Unreleased]
 
 ### In progress
-- Phase 2 — Queue + worker + deterministic cleaning end-to-end. (Design pending.)
+- Phase 3 — LLM plan generation + caching + evals (design pending).
+
+## [0.3.0] — 2026-05-24 — Phase 2: Queue + Worker + Deterministic Cleaning
+
+Upload → enqueue → worker → cleaning plan applied → Parquet in silver. **No LLM yet** (Phase 3); plans are hand-coded.
+
+### Added
+- `processing_jobs` table with `job_status` enum, FK to `files`, attempts counter, last_error, lifecycle timestamps. Alembic migration `0002_processing_jobs`.
+- `shared/cleaning/` library:
+  - `operations.py` — Pydantic discriminated-union ops: rename, coerce_type, parse_date, drop_nulls, fill_null, trim, lowercase
+  - `plan.py` — `CleaningPlan` model (version + source + operations list)
+  - `apply.py` — pure `apply(plan, df) → df` using polars; raises `PermanentCleaningError` / `TransientCleaningError`
+  - `registry.py` — `PLANS` dict with hand-coded `demo` and `vendor_a` plans (Phase 3 will replace with LLM cache)
+- `ProcessingJobsRepository` — upsert-queued, mark-running/cleaned/failed, attempt tracking.
+- Arq worker (`services/worker/`):
+  - `main.py` — `WorkerSettings`, `startup`/`shutdown` hooks, Prometheus HTTP server on port 9100
+  - `tasks.py` — `clean_file(file_id)` task: download bronze → polars.read_csv → apply plan → write Parquet to silver → update PG state
+  - `metrics.py` — `signal_cleaned_total`, `signal_cleaning_duration_seconds`, `signal_rows_processed`
+- `services/ingest_api/queue.py` — `ArqEnqueuer`; `make_pool` lifecycle in app lifespan; upload handler enqueues `clean_file` on successful create.
+- `POST /reprocess/{file_id}` — re-enqueues a previously processed file; idempotent.
+- `S3Storage` extended with `get_object`, `parse_uri`, `bucket` property for the worker's silver/bronze bucket needs.
+- `FilesRepository.set_status` — typed status updates with `error_message` propagation.
+- docker-compose: worker env wiring, `arq` as the entrypoint, port 9100 exposed for metrics.
+- `docs/phases/phase-2.md` — full design doc covering schema, applier contract, retry policy, idempotency, observability, test plan, scope guardrails.
+
+### Verified
+- **31/31 tests green** locally (2 smoke + 11 unit + 18 integration).
+- 11 unit tests for the cleaning applier — pure, no containers, cover every op + the demo/vendor_a fixtures.
+- 7 worker integration tests via testcontainers (Postgres + Redis + MinIO): upload-to-cleaned end-to-end, DuckDB-readable Parquet, vendor_a plan applies, missing plan → permanent fail, invalid CSV → permanent fail, reprocess idempotency, 404 on unknown file.
+- Live `docker compose up`: upload demo CSV → worker cleans in ~77ms → `status="cleaned"` → Parquet at `silver/demo/{yyyy}/{mm}/{dd}/{file_id}.parquet`.
+- Worker `/metrics` on port 9100 exposes `signal_cleaned_total{source,result}`, `signal_cleaning_duration_seconds`, `signal_rows_processed` with real per-source labels.
 
 ## [0.2.0] — 2026-05-24 — Phase 1: Ingest
 
