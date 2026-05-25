@@ -1,39 +1,39 @@
 # Handoff
 
 ## State (2026-05-24)
-**Phase 0 — shipped.** Repo public, CI green, docker-compose verified. Ready to start Phase 1.
+**Phase 1 — shipped.** Repo public, CI green, `POST /upload` end-to-end verified. Ready to start Phase 2.
 
 - Repo: https://github.com/TimRoller/signal-ingest
-- `main` is two commits ahead of empty:
-  - `b717191` feat: scaffold signal-ingest (Phase 0)
-  - `863098b` fix(docker): put uv venv on PATH so service entrypoints find uvicorn
+- Latest release: [v0.2.0](https://github.com/TimRoller/signal-ingest/releases/tag/v0.2.0)
 
-## Definition of Done for Phase 0 — verified
-- [x] Six containers boot: postgres+pgvector, redis, minio, ingest_api, mcp_server, worker
-- [x] postgres/redis/minio report `(healthy)` via docker-defined healthchecks
-- [x] `curl http://localhost:8000/health` → `{"ok": true}`
-- [x] `curl http://localhost:8001/health` → `{"ok": true}`
-- [x] CI on `main` is green (ruff + ruff format + mypy + pytest)
-- [x] README has architecture diagram + four-store table + phase checklist
-- [x] PLAN.md copied in (sanitized — no PII in public repo)
+## DoD for Phase 1 — verified
+- [x] `POST /upload` accepts CSV, writes to MinIO bronze + row to Postgres, returns 201 with `FileRecord`
+- [x] Idempotent on `(source, sha256)` — second call returns 200-equivalent with `duplicate: true` and same `file_id`
+- [x] `GET /status/{file_id}` returns row or 404
+- [x] `GET /files?limit&offset&source` paginates ordered by `created_at DESC`
+- [x] `GET /metrics` exposes Prometheus counters incl. `signal_uploads_total{source,result}`
+- [x] Alembic migration applies cleanly to a fresh DB (`0001_initial_files`)
+- [x] Integration tests run against real Postgres + real MinIO via testcontainers — 13 tests, all green
+- [x] `docker compose up -d --build` boots full stack; ingest_api runs migrations before serving
 
-## Next — Phase 1 (Weeks 1–2)
-Goal: `POST /upload` accepts a CSV, streams to MinIO bronze, writes a row to Postgres `files`, returns `{file_id, status: "received"}`.
+## Next — Phase 2 (Weeks 3–4)
+Goal: deterministic cleaning end-to-end. Upload → Redis enqueue → Arq worker pops job → reads bronze CSV → applies a *hard-coded* per-source cleaning plan (no LLM yet) → writes Parquet to silver → updates `files.status = 'cleaned'`.
 
-Build order:
-1. **Postgres schema + Alembic.** `files` table: id, source, original_name, sha256, byte_size, s3_uri, status (enum), created_at, updated_at. Alembic migration scripted from day one — no DB-side schema drift allowed.
-2. **MinIO client.** aiobotocore (async S3). Stream upload from FastAPI `UploadFile` to `bronze/{source}/{yyyy}/{mm}/{dd}/{sha256}.csv`.
-3. **`POST /upload` endpoint.** Multipart form. Compute sha256 mid-stream. On success write PG row and return 201 + `file_id`. Idempotent on `(source, sha256)`.
-4. **`GET /status/{file_id}` + `GET /files`.** Repository pattern in `shared/db/repositories/`.
-5. **Observability from start.** OTel SDK init in app startup; instrument FastAPI, asyncpg, aiobotocore. Prometheus `/metrics` endpoint on ingest_api. Pinned decision per PLAN.md §4.
-6. **Tests via testcontainers.** No DB mocks. Real Postgres + MinIO containers spun up per test session. Cover happy path + 2 failure modes (duplicate sha256, upload mid-stream disconnect).
+Build order to design (in a `docs/phases/phase-2.md` doc, mirroring the Phase 1 doc):
+
+1. **`processing_jobs` table** — references `files.id`; status enum (`queued` / `running` / `cleaned` / `failed`); retry count; `last_error`.
+2. **Job enqueue from ingest_api** — on successful upload (or via a separate POST /reprocess), push an Arq job with `file_id` as payload.
+3. **Worker bootstrap (Arq)** — connect to Redis, register `clean_file` task; lifespan-style init for shared DB session and S3 client.
+4. **Deterministic cleaning plan** — hard-coded `CleaningPlan` Pydantic models per source (e.g., `demo`, `vendor_a`). No LLM. This is the deterministic skeleton; Phase 3 will add LLM plan generation on top.
+5. **polars pipeline** — read bronze CSV, apply plan (rename, coerce, drop nulls, etc.), validate against a canonical Pydantic schema, write Parquet to `silver/{source}/{yyyy}/{mm}/{dd}/{file_id}.parquet`.
+6. **Status updates** — worker writes `running` on pickup, `cleaned` on success, `failed` + `error_message` on exception.
+7. **Observability** — span around clean_file, per-source success/failure counters, rows-processed histogram.
+8. **Integration test** — testcontainers spins up PG + Redis + MinIO; upload → wait for worker → assert silver Parquet exists + `files.status='cleaned'`.
 
 Acceptance:
-- `curl -F 'file=@sample.csv' http://localhost:8000/upload` → 201 with `{file_id, status}`
-- `GET /status/{file_id}` → JSON row
-- `GET /files` → paginated list
-- Integration test green locally and in CI
-- Prometheus metrics scrape-able from ingest_api `:8000/metrics`
+- Upload demo CSV → within ~2s, `GET /status/{file_id}` shows `status: "cleaned"`
+- Object exists at `silver/demo/.../{file_id}.parquet`, readable by DuckDB
+- `signal_cleaned_total{source="demo"} 1.0` on `/metrics`
 
 ## Operational Notes
 - **Docker runtime is OrbStack** (`brew install --cask orbstack`). docker CLI at `~/.orbstack/bin/docker` — interactive shell finds it via OrbStack's shell init, but the Claude Bash tool may not; prepend `export PATH="$HOME/.orbstack/bin:$PATH"` in commands if `docker` is "not found".

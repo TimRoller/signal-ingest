@@ -6,7 +6,7 @@
 
 > A production-shaped data ingestion + serving platform: messy CSVs in, deterministic LLM-driven cleaning, exposed via an MCP server, queryable from a Slackbot or web UI.
 
-**Status:** Phase 0 — scaffold complete · [v0.1.0](https://github.com/TimRoller/signal-ingest/releases) · CI green
+**Status:** Phase 1 — ingest shipped · [v0.2.0](https://github.com/TimRoller/signal-ingest/releases) · CI green
 
 ---
 
@@ -69,18 +69,31 @@ Short, durable decision records — what was chosen and what we accept by choosi
 
 ```bash
 docker compose up -d --build
-curl http://localhost:8000/health   # ingest_api  → {"ok": true}
-curl http://localhost:8001/health   # mcp_server  → {"ok": true}
+
+# upload a CSV
+echo "id,name,value" > sample.csv
+echo "1,alpha,10"    >> sample.csv
+curl -F 'file=@sample.csv;type=text/csv' -F 'source=demo' http://localhost:8000/upload
+
+# upload again — same (source, sha256) → idempotent, returns same file_id with duplicate: true
+curl -F 'file=@sample.csv;type=text/csv' -F 'source=demo' http://localhost:8000/upload
+
+# list uploaded files
+curl http://localhost:8000/files
+
+# Prometheus metrics
+curl http://localhost:8000/metrics | grep signal_uploads_total
+
 docker compose down
 ```
 
-Six services start: `postgres` (with pgvector), `redis`, `minio`, `ingest_api`, `mcp_server`, `worker`.
+Six services boot: `postgres` (with pgvector), `redis`, `minio`, `ingest_api`, `mcp_server`, `worker`. The `ingest_api` runs `alembic upgrade head` before serving.
 
 ## Status — 8-week phased build
 
 - [x] **Phase 0** — Repo scaffolded, docker-compose verified, CI green
-- [ ] **Phase 1** — `POST /upload` → file in MinIO + row in Postgres (in progress)
-- [ ] **Phase 2** — Queue + worker + deterministic cleaning end-to-end
+- [x] **Phase 1** — `POST /upload` → file in MinIO + row in Postgres
+- [ ] **Phase 2** — Queue + worker + deterministic cleaning end-to-end (next)
 - [ ] **Phase 3** — LLM plan generation + caching + evals
 - [ ] **Phase 4** — MCP server with 4 tools
 - [ ] **Phase 5** — Slackbot / web UI consumer

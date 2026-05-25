@@ -7,7 +7,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This pr
 ## [Unreleased]
 
 ### In progress
-- Phase 1 — `POST /upload` endpoint, MinIO bronze write, Postgres `files` row, Alembic migration, integration test via testcontainers.
+- Phase 2 — Queue + worker + deterministic cleaning end-to-end. (Design pending.)
+
+## [0.2.0] — 2026-05-24 — Phase 1: Ingest
+
+`POST /upload` works end-to-end.
+
+### Added
+- Postgres `files` table with `(source, sha256)` unique constraint, `file_status` enum (`received` / `processing` / `cleaned` / `failed`), indexes on `created_at DESC` and `status`. Alembic migration `0001_initial_files`.
+- SQLAlchemy `FileORM` + Pydantic `FileRecord` / `UploadResponse` / `FileListResponse` in `shared/models/file.py`.
+- `FilesRepository` (insert-if-absent via `ON CONFLICT DO NOTHING`, get, list, delete).
+- Async SQLAlchemy session factory in `shared/db/session.py`.
+- `shared/observability/init.py` — OpenTelemetry tracing (console exporter by default, OTLP-capable), FastAPI auto-instrumentation, Prometheus `/metrics` via `prometheus-fastapi-instrumentator`.
+- `services/ingest_api/storage.py` — async S3 client wrapper over `aiobotocore`; ensures bronze bucket on startup; PUT and DELETE operations.
+- `services/ingest_api/uploads.py` — multipart upload buffering with sha256 computed mid-stream, source validation against `^[a-z][a-z0-9_]{1,63}$`, content-type validation.
+- `services/ingest_api/main.py` — `POST /upload`, `GET /status/{file_id}`, `GET /files?limit&offset&source`, `GET /health`, `GET /metrics`.
+- Custom Prometheus metrics: `signal_uploads_total{source, result}`, `signal_upload_bytes{source}` histogram.
+- `docker-compose.yml` updates: env wiring for ingest_api, automatic `alembic upgrade head` before uvicorn boots.
+- Integration tests using testcontainers (real Postgres + real MinIO, no DB mocks): 13 tests covering happy path, idempotency, bad content-type, malformed source, missing fields, status lookup, list pagination + ordering + filtering, metrics exposure.
+- `docs/phases/phase-1.md` — design doc covering schema, contract, idempotency rules, failure modes, observability hooks, and test plan.
+
+### Verified
+- `docker compose up -d --build` boots all six services; ingest_api runs Alembic migrations before serving.
+- `curl -F file=@sample.csv -F source=demo http://localhost:8000/upload` → 201 with full `FileRecord`.
+- Repeated upload of identical bytes from the same source → 201 with `duplicate: true`, same `file_id`, no second MinIO PUT (object key is deterministic).
+- Object exists in MinIO at `bronze/{source}/{yyyy}/{mm}/{dd}/{sha256}.csv`.
+- `signal_uploads_total{result="created"}` and `signal_uploads_total{result="duplicate"}` both increment on `/metrics`.
+- 15/15 tests green (2 smoke + 13 integration).
 
 ## [0.1.0] — 2026-05-24 — Phase 0: Scaffold
 
