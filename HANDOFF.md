@@ -1,10 +1,21 @@
 # Handoff
 
 ## State (2026-05-24)
-**Phase 2 — shipped.** Worker pipeline live: upload → enqueue → polars cleaning → Parquet in silver → status flips to `cleaned`. Hand-coded plans for `demo` and `vendor_a`. Phase 3 swaps in LLM plan generation on the same boundary.
+**Phase 3 — shipped.** LLM plan generation live with Anthropic tool use. Novel sources call Claude Sonnet, get a validated `CleaningPlan`, cache it in Postgres by `(source, fingerprint, plan_version)`. Identical schemas thereafter cost zero LLM calls. Eval suite gates plan quality at ≥0.90 via on-demand `gh workflow run evals.yml`. Phase 4 is the MCP server.
 
 - Repo: https://github.com/TimRoller/signal-ingest
-- Latest release: [v0.3.0](https://github.com/TimRoller/signal-ingest/releases/tag/v0.3.0)
+- Latest release: [v0.4.0](https://github.com/TimRoller/signal-ingest/releases/tag/v0.4.0)
+
+## DoD for Phase 3 — verified
+- [x] Novel source upload → LLM generates `CleaningPlan` (Anthropic tool use) → file cleans successfully
+- [x] Same schema re-upload → cache hit, no LLM call (asserted via `MockPlanGenerator.calls`)
+- [x] Hallucinated column refs → file → `failed`, not cached
+- [x] `cleaning_plans` table populated with model + tokens + USD cost per call
+- [x] `signal_llm_calls_total`, `signal_llm_cost_usd`, `signal_plan_cache_hits_total`, `signal_plan_cache_misses_total` on worker `/metrics:9100`
+- [x] Hard-coded registry sources (`demo`, `vendor_a`) bypass the LLM entirely
+- [x] Eval suite: 3 happy + 2 failure-mode datasets; pass threshold 0.90
+- [x] `.github/workflows/evals.yml` `workflow_dispatch` job runs against real Anthropic API on demand
+- [x] 48/48 tests green in PR CI (mock LLM only)
 
 ## DoD for Phase 2 — verified
 - [x] Upload demo CSV → within ~1s, status flips to `cleaned`
@@ -26,23 +37,25 @@
 - [x] Integration tests run against real Postgres + real MinIO via testcontainers — 13 tests, all green
 - [x] `docker compose up -d --build` boots full stack; ingest_api runs migrations before serving
 
-## Next — Phase 3 (Week 5)
-Goal: replace hand-coded cleaning plans with **LLM-generated** plans, keyed and cached by schema fingerprint. The `CleaningPlan` Pydantic model from Phase 2 is the LLM's exact output contract — already validated, already applied by deterministic code (ADR 0003).
+## Next — Phase 4 (Week 6)
+Goal: stand up the MCP server so a downstream agent (or Slackbot/UI in Phase 5) can answer natural-language questions over the cleaned data without touching storage directly.
 
-Sketch of what Phase 3 introduces:
+Sketch:
 
-1. **`cleaning_plans` table** — stores plans keyed by `(source, fingerprint)`. Fingerprint = `hash(source, sorted column names, sample column types)`.
-2. **Plan generator** — Anthropic SDK client; prompts the LLM to emit a `CleaningPlan` JSON object given (file head, column names). Output validated against the Pydantic discriminated union.
-3. **Registry rewires to cache** — `get_plan(source, fingerprint)` now hits the PG cache first; on miss, calls the LLM, validates, persists, returns. The applier doesn't change.
-4. **Eval suite** — golden CSVs + expected canonical outputs in `evals/datasets/`; a CI-gated suite that grades LLM-generated plans against expected behavior. Use the `evals-guide.html` patterns.
-5. **Model routing** — Sonnet for novel/complex schemas, Haiku for retries on simpler shapes.
-6. **Cost discipline** — `signal_llm_cost_usd{model, source}` counter; plan reuse metrics.
+1. **`services/mcp_server/main.py`** — FastMCP server exposing four tools:
+   - `search_files(source?, status?, since?, limit, offset)` → list of `FileRecord`
+   - `get_file_metadata(file_id)` → full `FileRecord`
+   - `query_cleaned_data(sql_template, params)` → DuckDB scan over `silver/...`. Whitelist tables/columns to prevent abuse.
+   - `search_by_similarity(query, k)` → pgvector top-k over file-summary embeddings (Phase 4 generates these on clean)
+2. **Embedding step** — extend worker's `clean_file` to also embed a short summary (column list + small sample) into pgvector. Adds an `embeddings` table linked to `files`.
+3. **Connection from agents** — MCP stdio/HTTP transport. Doc the connection string in README.
+4. **Tests** — testcontainers integration: clean a file, ensure all four MCP tools answer correctly.
 
 Acceptance:
-- Upload a CSV from a *new* source (no hand-coded plan) → LLM generates plan → file cleans successfully.
-- Re-upload the same shape → cache hit, no LLM call (verified via metric).
-- Eval suite has ≥10 golden datasets + ≥3 failure-mode datasets, CI-gated.
-- LLM cost per file is bounded and visible in `/metrics`.
+- MCP server exposes 4 tools via `fastmcp`.
+- `query_cleaned_data` runs DuckDB against MinIO silver Parquet directly.
+- `search_by_similarity` returns relevant files for a natural-language query.
+- All tools accessible from an MCP client.
 
 ## Operational Notes
 - **Docker runtime is OrbStack** (`brew install --cask orbstack`). docker CLI at `~/.orbstack/bin/docker` — interactive shell finds it via OrbStack's shell init, but the Claude Bash tool may not; prepend `export PATH="$HOME/.orbstack/bin:$PATH"` in commands if `docker` is "not found".

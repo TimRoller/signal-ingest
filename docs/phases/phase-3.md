@@ -189,10 +189,10 @@ CI **does not** call the real Anthropic API. Three reasons:
 Strategy:
 
 - **`PlanGenerator` is a Protocol.** Production wires `AnthropicPlanGenerator`. Tests wire `MockPlanGenerator(canned_plans: dict[source, CleaningPlan])`.
-- **Eval suite** (separate from integration tests) runs against the **real API** in a nightly GitHub Actions job (not on every PR). Budget-capped via `ANTHROPIC_MAX_TOKENS_PER_RUN` env.
+- **Eval suite** (separate from integration tests) runs against the **real API** **on demand** via a GitHub Actions `workflow_dispatch` job — triggered manually (web UI or `gh workflow run`), not on a cron. Budget-capped via `ANTHROPIC_MAX_TOKENS_PER_RUN` env. Same workflow runs locally via `scripts/run_evals.sh`.
 - **Manual smoke**: a `scripts/smoke_llm_plan.py` lets the developer call the real API end-to-end locally with an `ANTHROPIC_API_KEY` env.
 
-This keeps the PR feedback loop cheap and fast while still exercising the real API on a regular cadence.
+This keeps the PR feedback loop cheap and fast while letting the developer fire the real-API eval before every release (or whenever the prompt / op grammar changes).
 
 ## Eval suite
 
@@ -236,8 +236,8 @@ Eval pass criterion: **mean score ≥ 0.90** across all happy datasets, AND **ev
 ### CI gating
 
 - **PR CI**: runs unit + integration tests with mocked LLM. Fast (~30s overhead vs Phase 2).
-- **Nightly CI** (new): runs the eval suite against the real API. Posts results to a `evals-results` branch. If score drops below threshold, opens an issue.
-- **Release CI**: tags `vX.Y.0` require a green nightly within the last 24h.
+- **On-demand eval workflow**: `.github/workflows/evals.yml` with `workflow_dispatch` — fire from web UI or `gh workflow run evals.yml`. Runs the eval suite against the real Anthropic API; fails the run if mean score < 0.90 or any failure-mode dataset succeeds. Posts a job summary with per-dataset scores.
+- **Release discipline**: developer runs the eval workflow manually before each `vX.Y.0` tag and checks it green.
 
 ### What the eval suite is *not*
 

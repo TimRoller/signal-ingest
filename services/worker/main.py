@@ -10,6 +10,8 @@ from services.ingest_api.storage import S3Config, S3Storage
 from services.worker.config import WorkerConfig
 from services.worker.tasks import clean_file
 from shared.db.session import make_engine, make_session_factory
+from shared.llm import PlanGenerator
+from shared.llm.generator import AnthropicPlanGenerator
 from shared.observability.init import init_tracing
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -56,6 +58,17 @@ async def startup(ctx: dict[str, Any]) -> None:
     await silver.ensure_bucket()
     ctx["bronze_storage"] = bronze
     ctx["silver_storage"] = silver
+
+    plan_generator: PlanGenerator | None = None
+    if not config.disable_llm and config.anthropic_api_key:
+        plan_generator = AnthropicPlanGenerator(
+            model=config.anthropic_model,
+            api_key=config.anthropic_api_key,
+        )
+        _logger.info("plan generator: Anthropic %s", config.anthropic_model)
+    else:
+        _logger.info("plan generator: disabled (no API key or DISABLE_LLM=1)")
+    ctx["plan_generator"] = plan_generator
 
     _logger.info("worker startup complete: bronze=%s silver=%s", bronze.bucket, silver.bucket)
 

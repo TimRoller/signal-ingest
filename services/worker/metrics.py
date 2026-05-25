@@ -21,3 +21,27 @@ ROWS_PROCESSED = Histogram(
     labelnames=("source",),
     buckets=(10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000),
 )
+
+LLM_CALLS_TOTAL = Counter(
+    "signal_llm_calls_total",
+    "LLM plan-generation calls",
+    labelnames=("source", "model", "result"),
+)
+
+LLM_COST_USD = Counter(
+    "signal_llm_cost_usd",
+    "Cumulative LLM spend in USD",
+    labelnames=("source", "model"),
+)
+
+PLAN_CACHE_HITS = Counter(
+    "signal_plan_cache_hits_total",
+    "Plan resolutions served from the Postgres cache",
+    labelnames=("source",),
+)
+
+PLAN_CACHE_MISSES = Counter(
+    "signal_plan_cache_misses_total",
+    "Plan resolutions that required LLM generation or hard-coded fallback",
+    labelnames=("source",),
+)

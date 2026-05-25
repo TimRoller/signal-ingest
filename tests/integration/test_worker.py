@@ -102,7 +102,7 @@ async def test_missing_plan_marks_file_failed_permanently(
     body = status.json()
     assert body["status"] == "failed"
     assert body["error_message"] is not None
-    assert "no cleaning plan" in body["error_message"].lower()
+    assert "no cached plan" in body["error_message"].lower()
 
 
 async def test_invalid_csv_marks_file_failed_permanently(

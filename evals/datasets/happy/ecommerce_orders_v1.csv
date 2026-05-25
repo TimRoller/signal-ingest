@@ -1,0 +1,4 @@
+order_id,customer_name,order_date,amount_usd
+1001, Alice Smith, 2026-01-15, 49.99
+1002,BOB JONES, 2026-01-16, 19.50
+1003,carol mendez, 2026-01-17, 124.00

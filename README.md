@@ -6,7 +6,7 @@
 
 > A production-shaped data ingestion + serving platform: messy CSVs in, deterministic LLM-driven cleaning, exposed via an MCP server, queryable from a Slackbot or web UI.
 
-**Status:** Phase 2 — worker + cleaning shipped · [v0.3.0](https://github.com/TimRoller/signal-ingest/releases) · CI green
+**Status:** Phase 3 — LLM cleaning + evals shipped · [v0.4.0](https://github.com/TimRoller/signal-ingest/releases) · CI green
 
 ---
 
@@ -97,7 +97,8 @@ Six services boot: `postgres` (with pgvector), `redis`, `minio`, `ingest_api`, `
 - [x] **Phase 0** — Repo scaffolded, docker-compose verified, CI green
 - [x] **Phase 1** — `POST /upload` → file in MinIO + row in Postgres
 - [x] **Phase 2** — Queue + worker + deterministic cleaning end-to-end
-- [ ] **Phase 3** — LLM plan generation + caching + evals (next)
+- [x] **Phase 3** — LLM plan generation + fingerprint cache + evals
+- [ ] **Phase 4** — MCP server with 4 tools (next)
 - [ ] **Phase 3** — LLM plan generation + caching + evals
 - [ ] **Phase 4** — MCP server with 4 tools
 - [ ] **Phase 5** — Slackbot / web UI consumer

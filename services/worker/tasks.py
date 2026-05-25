@@ -12,17 +12,22 @@ from services.ingest_api.storage import S3Storage
 from services.worker.metrics import (
     CLEANED_TOTAL,
     CLEANING_DURATION,
+    LLM_CALLS_TOTAL,
+    LLM_COST_USD,
+    PLAN_CACHE_HITS,
+    PLAN_CACHE_MISSES,
     ROWS_PROCESSED,
 )
 from shared.cleaning import (
     PermanentCleaningError,
     TransientCleaningError,
     apply,
-    get_plan,
+    resolve_plan,
 )
 from shared.db.repositories.files import FilesRepository
 from shared.db.repositories.processing_jobs import ProcessingJobsRepository
 from shared.db.session import session_scope
+from shared.llm import PlanGenerationError
 from shared.models.file import FileStatus
 
 _logger = logging.getLogger(__name__)
@@ -33,6 +38,7 @@ async def clean_file(ctx: dict[str, Any], file_id: str) -> None:
     session_factory = ctx["session_factory"]
     bronze_storage: S3Storage = ctx["bronze_storage"]
     silver_storage: S3Storage = ctx["silver_storage"]
+    llm = ctx.get("plan_generator")
 
     started = time.monotonic()
 
@@ -48,23 +54,45 @@ async def clean_file(ctx: dict[str, Any], file_id: str) -> None:
         await files.set_status(fid, FileStatus.processing)
 
     source = row.source
-    plan = get_plan(source)
-    if plan is None:
-        await _mark_failed(
-            session_factory, fid, source, f"no cleaning plan registered for source={source!r}"
-        )
-        return
 
     try:
         bronze_bytes = await _download_bronze(bronze_storage, row.s3_uri)
         df = _read_csv(bronze_bytes)
-        cleaned = apply(plan, df)
+
+        try:
+            resolved = await resolve_plan(
+                source=source,
+                df=df,
+                session_factory=session_factory,
+                llm=llm,
+            )
+        except PlanGenerationError as exc:
+            LLM_CALLS_TOTAL.labels(source=source, model="unknown", result="generation_failed").inc()
+            raise PermanentCleaningError(str(exc)) from exc
+
+        if resolved.cache_hit:
+            PLAN_CACHE_HITS.labels(source=source).inc()
+        else:
+            PLAN_CACHE_MISSES.labels(source=source).inc()
+            if resolved.generated is not None:
+                LLM_CALLS_TOTAL.labels(
+                    source=source, model=resolved.generated.model, result="ok"
+                ).inc()
+                LLM_COST_USD.labels(source=source, model=resolved.generated.model).inc(
+                    float(resolved.generated.cost_usd)  # type: ignore[arg-type]
+                )
+
+        cleaned = apply(resolved.plan, df)
         silver_key = _silver_key(source, fid, row.created_at)
         parquet_bytes = _to_parquet(cleaned)
         await silver_storage.put_object(
             key=silver_key,
             body=parquet_bytes,
-            metadata={"source": source, "file-id": str(fid), "plan-version": plan.version},
+            metadata={
+                "source": source,
+                "file-id": str(fid),
+                "plan-version": resolved.plan.version,
+            },
         )
     except PermanentCleaningError as exc:
         await _mark_failed(session_factory, fid, source, str(exc))

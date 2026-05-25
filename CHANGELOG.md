@@ -7,7 +7,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This pr
 ## [Unreleased]
 
 ### In progress
-- Phase 3 — LLM plan generation + caching + evals (design pending).
+- Phase 4 — MCP server exposing search and query tools over the cleaned data.
+
+## [0.4.0] — 2026-05-24 — Phase 3: LLM Plan Generation + Fingerprint Cache + Evals
+
+The system now reasons about schemas it's never seen. Novel sources trigger a Claude Sonnet call (Anthropic tool use) to emit a structured `CleaningPlan`; the plan is cached by schema fingerprint in Postgres; identical schemas thereafter cost zero LLM calls. An on-demand eval suite scores LLM-generated plans against golden datasets and hard-gates ≥0.90.
+
+### Added
+- **`shared/llm/`** library:
+  - `fingerprint.py` — sha256 over `(source, sorted columns, paired dtypes, plan_version)`. Bumping `PLAN_VERSION` auto-invalidates the cache.
+  - `pricing.py` — per-model USD computation for Opus 4.7, Sonnet 4.6, Haiku 4.5; unknown models fall back to Sonnet rates.
+  - `generator.py` — `PlanGenerator` Protocol, `MockPlanGenerator` for tests, `AnthropicPlanGenerator` using **tool use** to force structured `CleaningPlan` output (schema derived from `CleaningPlan.model_json_schema()`).
+  - `validation.py` — pre-apply checks (column existence threaded through renames, rename-target collisions) raising `PermanentCleaningError`.
+- **`shared/cleaning/resolver.py`** — cache-first resolver: `(source, fingerprint, plan_version)` lookup → hard-coded registry → LLM fallback → validate → cache write.
+- **`cleaning_plans` table** (migration `0003_cleaning_plans`) with `(source, fingerprint, plan_version)` unique key, JSONB `plan_json`, model + token + cost columns.
+- **`CleaningPlansRepository`** — `get(source, fp, version)` and `put(...)`.
+- **Worker integration** — `clean_file` now resolves via `resolve_plan`; ctx carries a `plan_generator` (Anthropic in prod, mock in tests, `None` when LLM disabled).
+- **Worker config** — `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `DISABLE_LLM` knobs.
+- **New metrics** on worker `/metrics:9100`:
+  - `signal_llm_calls_total{source, model, result}`
+  - `signal_llm_cost_usd{source, model}`
+  - `signal_plan_cache_hits_total{source}` / `signal_plan_cache_misses_total{source}`
+- **Eval suite** (`evals/`):
+  - 3 happy-path golden datasets (`marketing_metrics_v1`, `ecommerce_orders_v1`, `signups_v1`) — each with a synthetic input CSV and a Python module returning the expected canonical polars DataFrame.
+  - 2 failure-mode datasets (`empty.csv`, `not_csv.csv`).
+  - `evals/suites/test_plan_grading.py` — grades LLM output on schema match (50%) + cell-level equality (50%); pass threshold 0.90.
+  - `evals/suites/test_failure_modes.py` — asserts each bad input is rejected at some layer (CSV parse, LLM generation, validation, or apply).
+- **`.github/workflows/evals.yml`** — `workflow_dispatch` job (manual trigger) running the eval suite against the real Anthropic API; uses `ANTHROPIC_API_KEY` secret.
+- **`docs/phases/phase-3.md`** — full design doc covering tool-use vs JSON mode, fingerprint scheme, retry/error semantics, mock-in-CI strategy, eval scoring rubric.
+
+### Verified
+- **48/48 tests green** in PR CI: 2 smoke + 14 unit + 32 integration.
+- New unit tests: 5 for fingerprint, 5 for plan validation, 4 for pricing.
+- New integration tests via testcontainers + `MockPlanGenerator`: novel source triggers LLM → plan cached → re-upload hits cache; bad LLM output (hallucinated column) marks file failed and is not cached; hard-coded registry sources skip the LLM entirely.
+- Live `docker compose up`: novel-source upload exercised end-to-end with the mock generator (real API exercised only via `evals.yml` workflow_dispatch).
+
+### Pinned decisions
+- **Tool use, not JSON mode** — API-enforced schema; LLM cannot return free-form text.
+- **`PLAN_VERSION` in the cache key** — grammar changes auto-invalidate without migration.
+- **Sonnet-only for now** — one LLM call per fingerprint = no cost-vs-quality tradeoff to optimize yet. Model routing deferred to Phase 6.
+- **Mock LLM in PR CI; real API only on-demand** via `gh workflow run evals.yml` — keeps the PR loop cheap and deterministic.
 
 ## [0.3.0] — 2026-05-24 — Phase 2: Queue + Worker + Deterministic Cleaning
 

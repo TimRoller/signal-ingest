@@ -135,7 +135,9 @@ async def truncate_db_between_tests(database_url: str) -> AsyncIterator[None]:
     async with engine.begin() as conn:
         from sqlalchemy import text
 
-        await conn.execute(text("TRUNCATE TABLE processing_jobs, files RESTART IDENTITY CASCADE"))
+        await conn.execute(
+            text("TRUNCATE TABLE processing_jobs, cleaning_plans, files RESTART IDENTITY CASCADE")
+        )
     await engine.dispose()
 
 
@@ -146,7 +148,11 @@ async def run_worker_burst(
     s3_endpoint_url: str,
     redis_url: str,
 ):
-    """Returns a callable that drains all queued Arq jobs once."""
+    """Returns a callable that drains all queued Arq jobs once.
+
+    Accepts an optional `plan_generator` override (e.g., a MockPlanGenerator)
+    that gets attached to the worker `ctx` after the production startup runs.
+    """
     monkeypatch.setenv("DATABASE_URL", database_url)
     monkeypatch.setenv("REDIS_URL", redis_url)
     monkeypatch.setenv("S3_ENDPOINT_URL", s3_endpoint_url)
@@ -155,6 +161,7 @@ async def run_worker_burst(
     monkeypatch.setenv("S3_REGION", "us-east-1")
     monkeypatch.setenv("BRONZE_BUCKET", "bronze")
     monkeypatch.setenv("SILVER_BUCKET", "silver")
+    monkeypatch.setenv("DISABLE_LLM", "1")  # production startup skips Anthropic init
 
     from arq import Worker
     from arq.connections import RedisSettings
@@ -162,12 +169,17 @@ async def run_worker_burst(
     from services.worker.main import shutdown, startup
     from services.worker.tasks import clean_file
 
-    async def _run() -> None:
+    async def _run(plan_generator=None) -> None:
+        async def _startup(ctx):
+            await startup(ctx)
+            if plan_generator is not None:
+                ctx["plan_generator"] = plan_generator
+
         worker = Worker(
             functions=[clean_file],
             redis_settings=RedisSettings.from_dsn(redis_url),
             burst=True,
-            on_startup=startup,
+            on_startup=_startup,
             on_shutdown=shutdown,
             max_tries=3,
             handle_signals=False,

@@ -25,3 +25,7 @@ class WorkerConfig(BaseSettings):
 
     max_tries: int = Field(default=5, alias="WORKER_MAX_TRIES")
     metrics_port: int = Field(default=9100, alias="WORKER_METRICS_PORT")
+
+    anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
+    anthropic_model: str = Field(default="claude-sonnet-4-6", alias="ANTHROPIC_MODEL")
+    disable_llm: bool = Field(default=False, alias="DISABLE_LLM")

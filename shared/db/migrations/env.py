@@ -10,6 +10,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from shared.db.base import Base
+from shared.models import cleaning_plan_row as _cleaning_plan_model  # noqa: F401
 from shared.models import file as _file_model  # noqa: F401 — register tables
 from shared.models import processing_job as _processing_job_model  # noqa: F401
 

@@ -1,0 +1,46 @@
+name: evals
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why are you running evals?"
+        required: false
+        default: "manual"
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run live evals against Anthropic API
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: uv run pytest evals/suites -v
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Eval run — ${{ github.event.inputs.reason }}"
+            echo
+            echo "Triggered by @${{ github.actor }} on \`${{ github.sha }}\`."
+            echo
+            echo "Pass criterion: mean happy score ≥ 0.90; every failure-mode dataset rejected."
+          } >> "$GITHUB_STEP_SUMMARY"
