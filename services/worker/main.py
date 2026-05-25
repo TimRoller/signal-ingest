@@ -15,6 +15,8 @@ from shared.observability.init import init_tracing
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 _logger = logging.getLogger("worker")
 
+_metrics_server_started = False
+
 
 def _redis_settings(url: str) -> RedisSettings:
     return RedisSettings.from_dsn(url)
@@ -38,9 +40,10 @@ async def startup(ctx: dict[str, Any]) -> None:
 
     init_tracing(config.service_name, config.otlp_endpoint)
 
-    if not ctx.get("metrics_server_started"):
+    global _metrics_server_started
+    if not _metrics_server_started:
         start_http_server(config.metrics_port)
-        ctx["metrics_server_started"] = True
+        _metrics_server_started = True
         _logger.info("prometheus metrics exposed on :%d", config.metrics_port)
 
     engine = make_engine(config.database_url)
